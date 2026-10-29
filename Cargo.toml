@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["gpui-pre", "gpui-pre-windows"]
+
+# `gpui-pre-windows` pins `gpui-pre = "=0.3.10"` from crates.io; inside this workspace it builds against the sibling.
+[patch.crates-io]
+gpui-pre = { path = "gpui-pre" }
