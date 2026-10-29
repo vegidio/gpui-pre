@@ -5189,6 +5189,26 @@ impl Window {
         });
     }
 
+    /// Paint a shared Direct3D 11 texture into the scene for the next frame at the current z-index, stretched over
+    /// `bounds`. See [`SharedTexture`](crate::SharedTexture) for what the texture must be.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(target_os = "windows")]
+    pub fn paint_surface(&mut self, bounds: Bounds<Pixels>, shared_texture: crate::SharedTexture) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            shared_texture,
+        });
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

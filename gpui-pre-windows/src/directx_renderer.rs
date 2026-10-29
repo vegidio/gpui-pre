@@ -49,6 +49,9 @@ pub(crate) struct DirectXRenderer {
     width: u32,
     height: u32,
 
+    /// Whether a surface failed to open since the last one that opened, so a texture that keeps failing warns once.
+    pub(crate) surface_warned: bool,
+
     /// Whether we want to skip drwaing due to device lost events.
     ///
     /// In that case we want to discard the first frame that we draw as we got reset in the middle of a frame
@@ -92,12 +95,15 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    surfaces: PipelineState<SurfaceSprite>,
 }
 
 struct DirectXGlobalElements {
     global_params_buffer: Option<ID3D11Buffer>,
     batch_params_buffer: Option<ID3D11Buffer>,
     sampler: Option<ID3D11SamplerState>,
+    /// Clamps at the edges, so a scaled surface does not blend in its opposite edge.
+    clamp_sampler: Option<ID3D11SamplerState>,
 }
 
 struct Annotation<'a>(&'a ID3DUserDefinedAnnotation);
@@ -193,6 +199,7 @@ impl DirectXRenderer {
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
+            surface_warned: false,
             skip_draws: false,
         })
     }
@@ -346,7 +353,7 @@ impl DirectXRenderer {
     /// [`draw`](Self::draw) (which then presents) and
     /// [`render_to_image`](Self::render_to_image) (which reads the target back
     /// instead), so the two cannot drift.
-    fn render(
+    pub(crate) fn render(
         &mut self,
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
@@ -817,6 +824,47 @@ impl DirectXRenderer {
         if surfaces.is_empty() {
             return Ok(());
         }
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let sprites = surfaces
+            .iter()
+            .map(|surface| SurfaceSprite {
+                bounds: surface.bounds,
+                content_mask: surface.content_mask.bounds,
+            })
+            .collect::<Vec<_>>();
+        self.pipelines.surfaces.update_buffer(
+            &devices.device,
+            &devices.device_context,
+            &sprites,
+        )?;
+        let batch_params_buffer = self
+            .globals
+            .batch_params_buffer
+            .as_ref()
+            .context("batch params buffer missing")?;
+        for (index, surface) in surfaces.iter().enumerate() {
+            // Opened on every draw: it costs microseconds, and nothing has to be kept in step with the producer.
+            let view = match open_shared_texture(&devices.device, &surface.shared_texture) {
+                Ok(view) => {
+                    self.surface_warned = false;
+                    view
+                }
+                Err(error) => {
+                    if !std::mem::replace(&mut self.surface_warned, true) {
+                        log::warn!("A shared texture cannot be drawn and is skipped: {error:#}");
+                    }
+                    continue;
+                }
+            };
+            self.pipelines.surfaces.draw_range_with_texture(
+                &devices.device_context,
+                &[Some(view)],
+                batch_params_buffer,
+                slice::from_ref(&self.globals.clamp_sampler),
+                index as u32,
+                1,
+            )?;
+        }
         Ok(())
     }
 
@@ -997,6 +1045,13 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let surfaces = PipelineState::new(
+            device,
+            "surface_pipeline",
+            ShaderModule::Surface,
+            4,
+            create_blend_state(device)?,
+        )?;
 
         Ok(Self {
             shadow_pipeline,
@@ -1007,6 +1062,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            surfaces,
         })
     }
 }
@@ -1039,12 +1095,12 @@ impl DirectXGlobalElements {
         let global_params_buffer = create_constant_buffer::<GlobalParams>(device)?;
         let batch_params_buffer = create_constant_buffer::<BatchParams>(device)?;
 
-        let sampler = unsafe {
+        let create_sampler = |address| -> Result<_> {
             let desc = D3D11_SAMPLER_DESC {
                 Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-                AddressU: D3D11_TEXTURE_ADDRESS_WRAP,
-                AddressV: D3D11_TEXTURE_ADDRESS_WRAP,
-                AddressW: D3D11_TEXTURE_ADDRESS_WRAP,
+                AddressU: address,
+                AddressV: address,
+                AddressW: address,
                 MipLODBias: 0.0,
                 MaxAnisotropy: 1,
                 ComparisonFunc: D3D11_COMPARISON_ALWAYS,
@@ -1053,14 +1109,17 @@ impl DirectXGlobalElements {
                 MaxLOD: D3D11_FLOAT32_MAX,
             };
             let mut output = None;
-            device.CreateSamplerState(&desc, Some(&mut output))?;
-            output
+            unsafe { device.CreateSamplerState(&desc, Some(&mut output))? };
+            Ok(output)
         };
+        let sampler = create_sampler(D3D11_TEXTURE_ADDRESS_WRAP)?;
+        let clamp_sampler = create_sampler(D3D11_TEXTURE_ADDRESS_CLAMP)?;
 
         Ok(Self {
             global_params_buffer,
             batch_params_buffer,
             sampler,
+            clamp_sampler,
         })
     }
 }
@@ -1279,6 +1338,37 @@ struct PathRasterizationSprite {
 #[repr(C)]
 struct PathSprite {
     bounds: Bounds<ScaledPixels>,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SurfaceSprite {
+    bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+}
+
+/// Opens `texture` on `device`, as a view the surface shader samples.
+fn open_shared_texture(
+    device: &ID3D11Device,
+    texture: &SharedTexture,
+) -> Result<ID3D11ShaderResourceView> {
+    use std::os::windows::io::AsRawHandle;
+
+    let device: ID3D11Device1 = device
+        .cast()
+        .context("Direct3D 11.1 is needed to open shared textures")?;
+    // SAFETY: the handle is an open NT handle that `texture` owns for the duration of the call.
+    let resource: ID3D11Texture2D = unsafe {
+        device.OpenSharedResource1(windows::Win32::Foundation::HANDLE(
+            texture.handle().as_raw_handle(),
+        ))
+    }
+    .context("opening the shared texture on GPUI's device")?;
+    let mut view = None;
+    // SAFETY: the resource belongs to `device`; the default view covers the whole texture.
+    unsafe { device.CreateShaderResourceView(&resource, None, Some(&mut view)) }
+        .context("creating a view of the shared texture")?;
+    view.context("creating a view of the shared texture")
 }
 
 impl Drop for DirectXRenderer {
@@ -1716,6 +1806,7 @@ pub(crate) mod shader_resources {
         MonochromeSprite,
         SubpixelSprite,
         PolychromeSprite,
+        Surface,
         EmojiRasterization,
     }
 
@@ -1789,6 +1880,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::PolychromeSprite => match target {
                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => POLYCHROME_SPRITE_FRAGMENT_BYTES,
+                },
+                ShaderModule::Surface => match target {
+                    ShaderTarget::Vertex => SURFACE_VERTEX_BYTES,
+                    ShaderTarget::Fragment => SURFACE_FRAGMENT_BYTES,
                 },
                 ShaderModule::EmojiRasterization => match target {
                     ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
@@ -1880,6 +1975,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::MonochromeSprite => "monochrome_sprite",
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
+                ShaderModule::Surface => "surface",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
             }
         }

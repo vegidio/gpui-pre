@@ -47,6 +47,12 @@ name = "gpui_windows"
 path = "src/gpui_windows.rs"
 doctest = false
 
+[dev-dependencies.gpui]
+version = "=0.3.10"
+features = ["test-support"]
+default-features = false
+package = "gpui-pre"
+
 [dependencies.gpui]
 version = "=0.3.10"
 default-features = false

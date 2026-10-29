@@ -14,6 +14,16 @@ pub enum SurfaceSource {
     /// A CoreVideo image buffer
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     Surface(CFRetained<CVPixelBuffer>),
+    /// A shared Direct3D 11 texture
+    #[cfg(target_os = "windows")]
+    SharedTexture(crate::SharedTexture),
+}
+
+#[cfg(target_os = "windows")]
+impl From<crate::SharedTexture> for SurfaceSource {
+    fn from(value: crate::SharedTexture) -> Self {
+        SurfaceSource::SharedTexture(value)
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -31,7 +41,10 @@ pub struct Surface {
 }
 
 /// Create a new surface element.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+///
+/// On Windows, the texture is fitted with its [`with_size`](crate::SharedTexture::with_size); without it, it is
+/// stretched over the element's bounds.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
 pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),
@@ -89,14 +102,14 @@ impl Element for Surface {
         _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "ios")),
+            not(any(target_os = "macos", target_os = "ios", target_os = "windows")),
             allow(unused_variables)
         )]
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "ios")),
+            not(any(target_os = "macos", target_os = "ios", target_os = "windows")),
             allow(unused_variables)
         )]
         window: &mut Window,
@@ -112,6 +125,14 @@ impl Element for Surface {
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
                 // TODO: Add support for corner_radii
                 window.paint_surface(new_bounds, surface.clone());
+            }
+            #[cfg(target_os = "windows")]
+            SurfaceSource::SharedTexture(texture) => {
+                let new_bounds = match texture.size() {
+                    Some(size) => self.object_fit.get_bounds(bounds, size),
+                    None => bounds,
+                };
+                window.paint_surface(new_bounds, texture.clone());
             }
             #[allow(unreachable_patterns)]
             _ => {}

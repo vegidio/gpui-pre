@@ -1266,3 +1266,43 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+/*
+**
+**              Surfaces
+**
+*/
+
+struct SurfaceSprite {
+    Bounds bounds;
+    Bounds content_mask;
+};
+
+struct SurfaceVertexOutput {
+    float4 position: SV_Position;
+    float2 texture_position: TEXCOORD0;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+struct SurfaceFragmentInput {
+    float4 position: SV_Position;
+    float2 texture_position: TEXCOORD0;
+};
+
+StructuredBuffer<SurfaceSprite> surface_sprites: register(t1);
+
+SurfaceVertexOutput surface_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    SurfaceSprite sprite = surface_sprites[batch_start_index + instance_id];
+
+    SurfaceVertexOutput output;
+    output.position = to_device_position(unit_vertex, sprite.bounds);
+    output.texture_position = unit_vertex;
+    output.clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    return output;
+}
+
+// The texture is opaque and in the render target's format, so its colours pass through unchanged.
+float4 surface_fragment(SurfaceFragmentInput input): SV_Target {
+    return float4(t_sprite.Sample(s_sprite, input.texture_position).rgb, 1.0);
+}

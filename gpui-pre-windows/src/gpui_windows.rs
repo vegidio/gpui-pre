@@ -7,6 +7,8 @@ mod direct_manipulation;
 mod direct_write;
 mod directx_atlas;
 mod directx_devices;
+#[cfg(any(test, feature = "test-support"))]
+mod directx_headless;
 mod directx_renderer;
 mod dispatcher;
 mod display;
@@ -38,6 +40,8 @@ pub(crate) use vsync::*;
 pub(crate) use window::*;
 pub(crate) use wrapper::*;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use directx_headless::DirectXHeadlessRenderer;
 pub use platform::WindowsPlatform;
 
 pub(crate) use windows::Win32::Foundation::HWND;

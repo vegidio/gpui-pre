@@ -771,7 +771,80 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub image_buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+    #[cfg(target_os = "windows")]
+    pub shared_texture: SharedTexture,
 }
+
+/// A Direct3D 11 texture shared through an NT handle, which GPUI opens on its own device to draw it, with no copy.
+///
+/// The texture must be created with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` (and `D3D11_RESOURCE_MISC_SHARED`), be
+/// usable as a shader resource, and be on the adapter GPUI renders with. Its format is sampled as is and should be
+/// `DXGI_FORMAT_B8G8R8A8_UNORM`, the format GPUI renders in, so its colours are shown unchanged.
+///
+/// GPUI does no synchronisation: the producer must have finished writing the texture, on the GPU too, before it is
+/// painted, and must not write it again while a frame that painted it may still be drawn.
+///
+/// The handle is owned, so the texture stays alive for as long as GPUI holds it, whatever the producer does meanwhile.
+/// Clones share the handle.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug)]
+pub struct SharedTexture {
+    handle: std::sync::Arc<std::os::windows::io::OwnedHandle>,
+    size: Option<Size<crate::DevicePixels>>,
+}
+
+#[cfg(target_os = "windows")]
+impl SharedTexture {
+    /// Takes ownership of `handle`, an NT handle of the texture.
+    pub fn new(handle: std::os::windows::io::OwnedHandle) -> Self {
+        Self {
+            handle: std::sync::Arc::new(handle),
+            size: None,
+        }
+    }
+
+    /// Duplicates `handle`, an NT handle of the texture, so the caller keeps its own.
+    pub fn duplicate(handle: std::os::windows::io::BorrowedHandle<'_>) -> std::io::Result<Self> {
+        Ok(Self::new(handle.try_clone_to_owned()?))
+    }
+
+    /// Records the texture's size in pixels, which [`surface`](crate::surface) needs to fit it into its bounds. Not
+    /// needed for [`Window::paint_surface`](crate::Window::paint_surface), which draws into the bounds it is given.
+    pub fn with_size(mut self, width: u32, height: u32) -> Self {
+        self.size = Some(crate::size(
+            crate::DevicePixels(width as i32),
+            crate::DevicePixels(height as i32),
+        ));
+        self
+    }
+
+    /// The NT handle.
+    pub fn handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        std::os::windows::io::AsHandle::as_handle(&*self.handle)
+    }
+
+    /// The size recorded by [`with_size`](Self::with_size), if any.
+    pub fn size(&self) -> Option<Size<crate::DevicePixels>> {
+        self.size
+    }
+}
+
+/// Two shared textures are equal if they share one handle, as clones do. Duplicates of a handle are not equal.
+#[cfg(target_os = "windows")]
+impl PartialEq for SharedTexture {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.handle, &other.handle)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Eq for SharedTexture {}
+
+/// Present only in a GPUI patched with Windows surfaces ([`SharedTexture`], `Window::paint_surface` on Windows). A
+/// crate that needs them names it, so that without the patch its build fails with this name as the first error. See
+/// <https://github.com/vegidio/player-rs#windows-video>.
+#[cfg(target_os = "windows")]
+pub const WINDOWS_SURFACES_REQUIRE_PATCHED_GPUI: () = ();
 
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
