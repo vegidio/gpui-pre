@@ -18,6 +18,9 @@ pub struct WgpuContext {
     dual_source_blending: bool,
     color_texture_format: wgpu::TextureFormat,
     errors: Arc<DeviceErrorState>,
+    /// How the device imports the dma-bufs painted as surfaces, if it can.
+    #[cfg(target_os = "linux")]
+    dma_buf: Option<crate::dma_buf::ImportPath>,
 }
 
 /// Errors reported by wgpu's device-wide callbacks.
@@ -304,6 +307,9 @@ impl WgpuContext {
             adapter.get_info().backend
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
+        // Every new device, also after a device loss, publishes what it imports.
+        #[cfg(target_os = "linux")]
+        let dma_buf = crate::dma_buf::probe(&adapter, &device);
 
         Self {
             instance,
@@ -314,6 +320,8 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
+            #[cfg(target_os = "linux")]
+            dma_buf,
         }
     }
 
@@ -432,6 +440,14 @@ impl WgpuContext {
                 "Dual-source blending not available on this GPU. \
                 Subpixel text antialiasing will be disabled."
             );
+        }
+        // Imports dma-bufs with any modifier the driver lists; see `dma_buf.rs`.
+        #[cfg(target_os = "linux")]
+        if adapter
+            .features()
+            .contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
+        {
+            required_features |= wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
         }
 
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
@@ -736,6 +752,12 @@ impl WgpuContext {
 
     pub fn color_texture_format(&self) -> wgpu::TextureFormat {
         self.color_texture_format
+    }
+
+    /// How the device imports the dma-bufs painted as surfaces, if it can.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn dma_buf_import_path(&self) -> Option<crate::dma_buf::ImportPath> {
+        self.dma_buf
     }
 
     /// Returns true if the GPU device was lost (e.g., due to driver crash, suspend/resume).

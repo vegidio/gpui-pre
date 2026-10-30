@@ -17,6 +17,16 @@ pub enum SurfaceSource {
     /// A shared Direct3D 11 texture
     #[cfg(target_os = "windows")]
     SharedTexture(crate::SharedTexture),
+    /// A single-plane dma-buf
+    #[cfg(target_os = "linux")]
+    DmaBuf(crate::DmaBufTexture),
+}
+
+#[cfg(target_os = "linux")]
+impl From<crate::DmaBufTexture> for SurfaceSource {
+    fn from(value: crate::DmaBufTexture) -> Self {
+        SurfaceSource::DmaBuf(value)
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -42,9 +52,14 @@ pub struct Surface {
 
 /// Create a new surface element.
 ///
-/// On Windows, the texture is fitted with its [`with_size`](crate::SharedTexture::with_size); without it, it is
-/// stretched over the element's bounds.
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+/// On Windows, the texture is fitted with the size given to `SharedTexture::with_size`; without it, it is stretched
+/// over the element's bounds. On Linux, the buffer is fitted with its layout's size.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux"
+))]
 pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),
@@ -102,14 +117,24 @@ impl Element for Surface {
         _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "ios", target_os = "windows")),
+            not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "windows",
+                target_os = "linux"
+            )),
             allow(unused_variables)
         )]
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "ios", target_os = "windows")),
+            not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "windows",
+                target_os = "linux"
+            )),
             allow(unused_variables)
         )]
         window: &mut Window,
@@ -132,6 +157,11 @@ impl Element for Surface {
                     Some(size) => self.object_fit.get_bounds(bounds, size),
                     None => bounds,
                 };
+                window.paint_surface(new_bounds, texture.clone());
+            }
+            #[cfg(target_os = "linux")]
+            SurfaceSource::DmaBuf(texture) => {
+                let new_bounds = self.object_fit.get_bounds(bounds, texture.size());
                 window.paint_surface(new_bounds, texture.clone());
             }
             #[allow(unreachable_patterns)]

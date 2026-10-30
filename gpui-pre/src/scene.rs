@@ -773,6 +773,8 @@ pub struct PaintSurface {
     pub image_buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
     #[cfg(target_os = "windows")]
     pub shared_texture: SharedTexture,
+    #[cfg(target_os = "linux")]
+    pub dma_buf: DmaBufTexture,
 }
 
 /// A Direct3D 11 texture shared through an NT handle, which GPUI opens on its own device to draw it, with no copy.
@@ -845,6 +847,131 @@ impl Eq for SharedTexture {}
 /// <https://github.com/vegidio/player-rs#windows-video>.
 #[cfg(target_os = "windows")]
 pub const WINDOWS_SURFACES_REQUIRE_PATCHED_GPUI: () = ();
+
+/// A single-plane dma-buf, which GPUI imports on its own device to draw it, with no copy.
+///
+/// The buffer must be in the [`DmaBufLayout`] given with it. Only `DRM_FORMAT_ABGR8888` (R, G, B, A bytes in memory
+/// order) is drawn; its colours are shown unchanged. A buffer GPUI cannot import is skipped, and a warning is logged
+/// once. [`dma_buf_import`] tells which device and layouts GPUI's renderer can import.
+///
+/// GPUI does no synchronisation: the producer must have finished writing the buffer, on the GPU too, before it is
+/// painted, and must not write it again while a frame that painted it may still be drawn.
+///
+/// The file descriptor is owned, so the buffer stays alive for as long as GPUI holds it, whatever the producer does
+/// meanwhile. Clones share the descriptor.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+pub struct DmaBufTexture {
+    fd: std::sync::Arc<std::os::fd::OwnedFd>,
+    layout: DmaBufLayout,
+}
+
+/// How a single-plane dma-buf's pixels are laid out in its memory.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DmaBufLayout {
+    /// The width in pixels.
+    pub width: u32,
+    /// The height in pixels.
+    pub height: u32,
+    /// The DRM fourcc format code, such as `DRM_FORMAT_ABGR8888`.
+    pub fourcc: u32,
+    /// The DRM format modifier, such as `DRM_FORMAT_MOD_LINEAR` (0).
+    pub modifier: u64,
+    /// The distance in bytes between the starts of two rows.
+    pub stride: u32,
+    /// Where the first row starts, in bytes from the start of the buffer.
+    pub offset: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl DmaBufTexture {
+    /// Takes ownership of `fd`, a dma-buf file descriptor of the buffer.
+    pub fn new(fd: std::os::fd::OwnedFd, layout: DmaBufLayout) -> Self {
+        Self {
+            fd: std::sync::Arc::new(fd),
+            layout,
+        }
+    }
+
+    /// Duplicates `fd`, a dma-buf file descriptor of the buffer, so the caller keeps its own.
+    pub fn duplicate(
+        fd: std::os::fd::BorrowedFd<'_>,
+        layout: DmaBufLayout,
+    ) -> std::io::Result<Self> {
+        Ok(Self::new(fd.try_clone_to_owned()?, layout))
+    }
+
+    /// The dma-buf file descriptor.
+    pub fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&*self.fd)
+    }
+
+    /// The buffer's layout.
+    pub fn layout(&self) -> DmaBufLayout {
+        self.layout
+    }
+
+    /// The buffer's size in pixels.
+    pub fn size(&self) -> Size<crate::DevicePixels> {
+        crate::size(
+            crate::DevicePixels(self.layout.width as i32),
+            crate::DevicePixels(self.layout.height as i32),
+        )
+    }
+}
+
+/// Two dma-buf textures are equal if they share one descriptor, as clones do. Duplicates of a descriptor are not
+/// equal.
+#[cfg(target_os = "linux")]
+impl PartialEq for DmaBufTexture {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.fd, &other.fd)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Eq for DmaBufTexture {}
+
+/// What GPUI's renderer can import as a [`DmaBufTexture`].
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DmaBufImport {
+    /// The DRM render node of the device GPUI renders with, as its device number (`major`, `minor`), when the
+    /// renderer reports it. Buffers allocated there import without crossing devices.
+    pub render_node: Option<(u32, u32)>,
+    /// The DRM format modifiers GPUI imports for single-plane `DRM_FORMAT_ABGR8888` buffers, in order of preference.
+    /// `DRM_FORMAT_MOD_LINEAR` (0) is always among them.
+    pub modifiers: Vec<u64>,
+}
+
+#[cfg(target_os = "linux")]
+static DMA_BUF_IMPORT: std::sync::Mutex<Option<DmaBufImport>> = std::sync::Mutex::new(None);
+
+/// What GPUI's renderer can import as a [`DmaBufTexture`], once it has a device: `None` before, and when the renderer
+/// cannot import dma-bufs at all. Every window shares one device, so this holds for all of them.
+#[cfg(target_os = "linux")]
+pub fn dma_buf_import() -> Option<DmaBufImport> {
+    DMA_BUF_IMPORT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Called by GPUI's renderer whenever it creates a device. Not for applications.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn set_dma_buf_import(import: Option<DmaBufImport>) {
+    *DMA_BUF_IMPORT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = import;
+}
+
+/// Present only in a GPUI patched with Linux surfaces ([`DmaBufTexture`], `Window::paint_surface` on Linux). A crate
+/// that needs them names it, so that without the patch its build fails with this name as the first error. See
+/// <https://github.com/vegidio/player-rs#linux-video>.
+#[cfg(target_os = "linux")]
+pub const LINUX_SURFACES_REQUIRE_PATCHED_GPUI: () = ();
 
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {

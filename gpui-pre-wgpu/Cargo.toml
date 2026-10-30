@@ -48,6 +48,23 @@ name = "gpui_wgpu"
 path = "src/gpui_wgpu.rs"
 doctest = false
 
+# Linux surfaces (`dma_buf.rs`). Integration tests, since the unit-test target needs Zed's repository to build.
+[[test]]
+name = "dma_buf_texture"
+path = "tests/dma_buf_texture.rs"
+
+[[test]]
+name = "dma_buf_import"
+path = "tests/dma_buf_import.rs"
+
+[[test]]
+name = "surface_cache"
+path = "tests/surface_cache.rs"
+
+[[test]]
+name = "rgba_surface_shader"
+path = "tests/rgba_surface_shader.rs"
+
 [[bench]]
 name = "layout_line"
 path = "benches/layout_line.rs"
@@ -140,6 +157,20 @@ default-features = false
 
 [dependencies.unicode-segmentation]
 version = "1.10"
+
+# Linux surfaces (`dma_buf.rs`): raw Vulkan, EGL and GL for importing dma-bufs, at the versions wgpu-hal already uses.
+[target.'cfg(target_os = "linux")'.dependencies.ash]
+version = "0.38"
+
+[target.'cfg(target_os = "linux")'.dependencies.glow]
+version = "0.17"
+
+[target.'cfg(target_os = "linux")'.dependencies.khronos-egl]
+version = "6"
+features = ["dynamic"]
+
+[target.'cfg(target_os = "linux")'.dependencies.libc]
+version = "0.2"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
 version = "30.0.1"

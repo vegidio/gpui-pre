@@ -135,6 +135,9 @@ struct WgpuPipelines {
     poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
+    /// Single-plane RGBA textures: the dma-bufs painted on Linux.
+    #[cfg(target_os = "linux")]
+    rgba_surfaces: wgpu::RenderPipeline,
 }
 
 /// One frame allocation of instance data, ready to bind.
@@ -162,6 +165,9 @@ struct WgpuBindGroupLayouts {
     instances: wgpu::BindGroupLayout,
     texture: wgpu::BindGroupLayout,
     surfaces: wgpu::BindGroupLayout,
+    /// The per-draw parameters of `rgba_surfaces`, at a dynamic offset; its texture uses `texture`.
+    #[cfg(target_os = "linux")]
+    rgba_surface_params: wgpu::BindGroupLayout,
 }
 
 /// Shared GPU context reference, used to coordinate device recovery across multiple windows.
@@ -195,6 +201,9 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    /// The painted dma-bufs' imports, dropped with the device.
+    #[cfg(target_os = "linux")]
+    dma_bufs: crate::dma_buf::Surfaces,
 }
 
 struct CachedTextureBindGroup {
@@ -616,11 +625,29 @@ impl WgpuRendererCore {
             ],
         });
 
+        #[cfg(target_os = "linux")]
+        let rgba_surface_params =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("rgba_surface_params_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: NonZeroU64::new(crate::dma_buf::RGBA_SURFACE_PARAMS_SIZE),
+                    },
+                    count: None,
+                }],
+            });
+
         WgpuBindGroupLayouts {
             globals,
             instances,
             texture,
             surfaces,
+            #[cfg(target_os = "linux")]
+            rgba_surface_params,
         }
     }
 
@@ -912,6 +939,20 @@ impl WgpuRendererCore {
             &shader_module,
         );
 
+        #[cfg(target_os = "linux")]
+        let rgba_surfaces = create_pipeline(
+            "rgba_surfaces",
+            "vs_rgba_surface",
+            "fs_rgba_surface",
+            &layouts.globals,
+            &layouts.rgba_surface_params,
+            Some(&layouts.texture),
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(color_target.clone())],
+            1,
+            &shader_module,
+        );
+
         let surfaces = create_pipeline(
             "surfaces",
             "vs_surface",
@@ -935,6 +976,8 @@ impl WgpuRendererCore {
             subpixel_sprites,
             poly_sprites,
             surfaces,
+            #[cfg(target_os = "linux")]
+            rgba_surfaces,
         }
     }
 
@@ -1348,6 +1391,11 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                #[cfg(target_os = "linux")]
+                dma_bufs: crate::dma_buf::Surfaces::new(
+                    context.dma_buf_import_path(),
+                    context.adapter.get_info().name,
+                ),
             },
             atlas,
             path_globals_offset,
@@ -1492,6 +1540,8 @@ impl WgpuRendererCore {
                 )
             })?;
         self.prepare_texture_bind_groups(scene);
+        #[cfg(target_os = "linux")]
+        let mut surface_draws = self.prepare_dma_bufs(scene).into_iter();
 
         let mut encoder =
             self.resources()
@@ -1604,8 +1654,17 @@ impl WgpuRendererCore {
                             &mut pass,
                         )?;
                     }
-                    // Surfaces are macOS-only for video playback and are not
-                    // implemented by the WGPU renderer.
+                    // On Linux, the painted dma-bufs (see `dma_buf.rs`). Elsewhere surfaces are macOS-only for
+                    // video playback and are not implemented by the WGPU renderer.
+                    #[cfg(target_os = "linux")]
+                    PrimitiveBatch::Surfaces(surfaces) => {
+                        for _ in surfaces {
+                            if let Some(draw) = surface_draws.next().flatten() {
+                                self.draw_dma_buf(&draw, &mut pass);
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "linux"))]
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                 }
             }
@@ -1725,6 +1784,37 @@ impl WgpuRendererCore {
                 },
             );
         }
+    }
+
+    /// Imports, or reuses the imports of, the frame's painted dma-bufs: one draw per surface, in scene order.
+    #[cfg(target_os = "linux")]
+    fn prepare_dma_bufs(&mut self, scene: &Scene) -> Vec<Option<crate::dma_buf::Draw>> {
+        let resources = &mut self.resources;
+        let surfaces = scene.batches().flat_map(|batch| match batch {
+            PrimitiveBatch::Surfaces(range) => &scene.surfaces[range],
+            _ => &[],
+        });
+        resources.dma_bufs.prepare(
+            &resources.device,
+            &resources.queue,
+            &resources.bind_group_layouts.rgba_surface_params,
+            &resources.bind_group_layouts.texture,
+            &resources.atlas_sampler,
+            surfaces,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn draw_dma_buf(&self, draw: &crate::dma_buf::Draw, pass: &mut wgpu::RenderPass<'_>) {
+        let resources = self.resources();
+        let Some(params) = resources.dma_bufs.params_bind_group() else {
+            return;
+        };
+        pass.set_pipeline(&resources.pipelines.rgba_surfaces);
+        pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+        pass.set_bind_group(1, params, &[draw.offset]);
+        pass.set_bind_group(2, &draw.bind_group, &[]);
+        pass.draw(0..4, 0..1);
     }
 
     fn draw_instances(

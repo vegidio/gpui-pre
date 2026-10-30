@@ -1360,3 +1360,37 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
 
     return ycbcr_to_RGB * y_cb_cr;
 }
+
+// --- RGBA surfaces (Linux dma-bufs) --- //
+
+struct RgbaSurfaceParams {
+    bounds: Bounds,
+    content_mask: Bounds,
+    // The part of the texture the buffer's own pixels take, and the largest coordinate sampled, half a texel inside
+    // it, so a texture padded to the buffer's row width is never sampled past the buffer's width.
+    texture_scale: vec2<f32>,
+    texture_max: vec2<f32>,
+}
+
+@group(1) @binding(0) var<uniform> rgba_surface_locals: RgbaSurfaceParams;
+
+@vertex
+fn vs_rgba_surface(@builtin(vertex_index) vertex_id: u32) -> SurfaceVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+
+    var out = SurfaceVarying();
+    out.position = to_device_position(unit_vertex, rgba_surface_locals.bounds);
+    out.texture_position = unit_vertex * rgba_surface_locals.texture_scale;
+    out.clip_distances = distance_from_clip_rect(unit_vertex, rgba_surface_locals.bounds, rgba_surface_locals.content_mask);
+    return out;
+}
+
+@fragment
+fn fs_rgba_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    let position = min(input.texture_position, rgba_surface_locals.texture_max);
+    return vec4<f32>(textureSampleLevel(t_sprite, s_sprite, position, 0.0).rgb, 1.0);
+}
